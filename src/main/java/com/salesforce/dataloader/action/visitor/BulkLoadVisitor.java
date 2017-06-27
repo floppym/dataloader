@@ -297,29 +297,20 @@ public class BulkLoadVisitor extends DAOLoadVisitor {
 
         getProgressMonitor().setSubTask(Messages.getMessage(getClass(), "retrievingResults"));
 
-        final DataReader dataReader = resetDAO();
-
         // create a map of batch infos by batch id. Each batchinfo has the final processing state of the batch
         final Map<String, BatchInfo> batchInfoMap = createBatchInfoMap();
 
         // go through all the batches we sent to sfdc in the same order and process the batch results for
         // each one by looking them up in batchInfoMap
         for (final BatchData clientBatchInfo : this.allBatchesInOrder) {
-            if (clientBatchInfo.batchId == SKIP_BATCH_ID) {
-                skipDataRows(dataReader, clientBatchInfo.numRows);
-            } else {
-                processResults(dataReader, batchInfoMap.get(clientBatchInfo.batchId), clientBatchInfo);
+            if (clientBatchInfo.batchId != SKIP_BATCH_ID) {
+                processResults(batchInfoMap.get(clientBatchInfo.batchId), clientBatchInfo);
             }
         }
     }
 
-    private void processResults(final DataReader dataReader, final BatchInfo batch, BatchData clientBatchInfo)
+    private void processResults(final BatchInfo batch, BatchData clientBatchInfo)
             throws LoadException, DataAccessObjectException, AsyncApiException {
-        // For Bulk API, we don't save any success or error until the end,
-        // so we have to go through the original CSV from the beginning while
-        // we go through the results from the server.
-        // TODO we should save the ACTUAL rows/batches sent to the server
-
         // do some basic checks to make sure we are matching up the batches correctly
         sanityCheckBatch(clientBatchInfo, batch);
 
@@ -328,7 +319,11 @@ public class BulkLoadVisitor extends DAOLoadVisitor {
         final String errorMessage = stateMessage == null ? null : Messages.getMessage(getClass(), "batchError",
                 stateMessage);
 
-        final List<Row> rows = dataReader.readRowList(clientBatchInfo.numRows);
+        // Read the request back from the server so that we don't have to keep
+        // the data in memory or a temporary file while the batches are being processed.
+        final CSVReader requestReader = this.jobUtil.getBatchRequest(batch.getId());
+        final List<Row> rows = getRows(requestReader);
+
         if (batch.getState() == BatchStateEnum.Completed || batch.getNumberRecordsProcessed() > 0) {
             try {
                 processBatchResults(batch, errorMessage, batch.getState(), rows);
@@ -342,9 +337,22 @@ public class BulkLoadVisitor extends DAOLoadVisitor {
         }
     }
 
-    private void skipDataRows(DataReader dataReader, int numRows) throws DataAccessObjectException {
-        List<Row> skippedRows = dataReader.readRowList(numRows);
-        assert skippedRows.size() == numRows;
+    private List<Row> getRows(CSVReader reader) throws DataAccessObjectException {
+        final List<Row> rows = new ArrayList<Row>();
+        try {
+            final List<String> headerRow = reader.nextRecord();
+            List<String> record;
+            while((record = reader.nextRecord()) != null) {
+                final Row row = new Row(headerRow.size());
+                for (int i = 0; i < headerRow.size(); i++) {
+                    row.put(headerRow.get(i), record.get(i));
+                }
+                rows.add(row);
+            }
+        } catch (IOException e) {
+            throw new DataAccessObjectException(e);
+        }
+        return rows;
     }
 
     private void processBatchResults(final BatchInfo batch, final String errorMessage, final BatchStateEnum state,
@@ -389,16 +397,6 @@ public class BulkLoadVisitor extends DAOLoadVisitor {
             batchInfoMap.put(bi.getId(), bi);
         }
         return batchInfoMap;
-    }
-
-    private DataReader resetDAO() throws DataAccessObjectInitializationException, LoadException {
-        final DataReader dataReader = (DataReader)getController().getDao();
-        dataReader.close();
-        // TODO: doing this causes sql to be executed twice, for sql we should cache results in a local file
-        dataReader.open();
-        // when re-opening the dao we need to start at the same row in the input
-        DAORowUtil.get().skipRowToStartOffset(getConfig(), dataReader, getProgressMonitor(), true);
-        return dataReader;
     }
 
     private void writeRowResult(Row row, RowResult resultRow) throws DataAccessObjectException {

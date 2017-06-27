@@ -191,6 +191,10 @@ class BulkApiVisitorUtil {
         return this.client.getBatchInfoList(getJobId());
     }
 
+    CSVReader getBatchRequest(String batchId) throws AsyncApiException {
+        return new CSVReader(this.client.getBatchRequestInputStream(getJobId(), batchId));
+    }
+
     CSVReader getBatchResults(String batchId) throws AsyncApiException {
         return new CSVReader(this.client.getBatchResultStream(getJobId(), batchId));
     }
